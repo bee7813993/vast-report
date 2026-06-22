@@ -2,16 +2,60 @@
 
 set -Eeuo pipefail
 
-REPORT_DIR="/home/bee/vast-report/reports"
+usage() {
+    cat <<'USAGE'
+Usage:
+  bin/send-vast-report --latest [--report-dir reports]
 
-LATEST_REPORT="$(
-    ls -1 "$REPORT_DIR"/report-*.md 2>/dev/null |
-    sort |
-    tail -n 1
-)"
+Print the latest generated Markdown report to stdout. This script does not send
+messages or change Vast.ai settings.
+USAGE
+}
 
-if [[ -z "${LATEST_REPORT:-}" || ! -s "$LATEST_REPORT" ]]; then
-    echo "No report found" >&2
+REPORT_DIR=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --latest)
+            shift
+            ;;
+        --report-dir)
+            REPORT_DIR="${2:-}"
+            if [[ -z "$REPORT_DIR" ]]; then
+                echo "--report-dir requires a value" >&2
+                exit 2
+            fi
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+REPORT_DIR="${REPORT_DIR:-$PROJECT_DIR/reports}"
+
+shopt -s nullglob
+REPORTS=("$REPORT_DIR"/report-*.md)
+
+if [[ "${#REPORTS[@]}" -eq 0 ]]; then
+    echo "No report found in $REPORT_DIR" >&2
+    exit 1
+fi
+
+mapfile -t SORTED_REPORTS < <(printf '%s\n' "${REPORTS[@]}" | sort)
+LATEST_INDEX=$((${#SORTED_REPORTS[@]} - 1))
+LATEST_REPORT="${SORTED_REPORTS[$LATEST_INDEX]}"
+
+if [[ ! -s "$LATEST_REPORT" ]]; then
+    echo "Latest report is empty: $LATEST_REPORT" >&2
     exit 1
 fi
 

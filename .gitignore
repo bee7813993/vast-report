@@ -4,4 +4,6 @@ __pycache__/
 tmp/
 logs/*.log
 reports/*.tmp
+reports/report-*.md
+reports/recommendation-*.json
 samples/*.txz

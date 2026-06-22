@@ -1,13 +1,7 @@
 timezone: Asia/Tokyo
 
 archive_dir: /home/bee/vast-daily
-report_dir: /home/bee/vast-report/reports
-
-baseline:
-  RTX_5090:
-    previous_effective_gpu_dph: 0.33
-  RTX_3090:
-    previous_effective_gpu_dph: 0.11
+report_dir: reports
 
 machines:
   "28351":
@@ -15,6 +9,7 @@ machines:
     gpu_key: RTX_5090
     current_on_demand: 0.38
     current_interruptible: 0.30
+    previous_effective_gpu_dph: 0.33
     storage_dph_adjustment: 0.00035
     candidate_on_demand:
       - 0.37
@@ -32,6 +27,7 @@ machines:
     gpu_key: RTX_3090
     current_on_demand: 0.145
     current_interruptible: 0.12
+    previous_effective_gpu_dph: 0.11
     storage_dph_adjustment: 0.00104
     candidate_on_demand:
       - 0.14
