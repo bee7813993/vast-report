@@ -1,0 +1,601 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import datetime as dt
+import glob
+import json
+import os
+import statistics
+import tarfile
+import tempfile
+from pathlib import Path
+
+import yaml
+
+
+def safe_float(value, default=0.0):
+    if value is None:
+        return default
+    try:
+        if value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def safe_int(value, default=0):
+    if value is None:
+        return default
+    try:
+        if value == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def fmt_money(value, digits=3):
+    if value is None:
+        return "-"
+    return f"${value:.{digits}f}"
+
+
+def fmt_pct(value):
+    if value is None:
+        return "-"
+    return f"{value * 100:.1f}%"
+
+
+def read_tsv(path):
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    with path.open("r", encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f, delimiter="\t"))
+
+
+def read_json(path):
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def find_latest_archive(archive_dir):
+    pattern = str(Path(archive_dir) / "vast-daily-*.txz")
+    archives = sorted(glob.glob(pattern))
+    if not archives:
+        raise SystemExit(f"No archive found: {pattern}")
+    return Path(archives[-1])
+
+
+def extract_archive(archive_path):
+    tmp = tempfile.TemporaryDirectory(prefix="vast-report-")
+    tmp_path = Path(tmp.name)
+
+    with tarfile.open(archive_path, "r:xz") as tf:
+        tf.extractall(tmp_path)
+
+    dirs = [p for p in tmp_path.iterdir() if p.is_dir()]
+    if not dirs:
+        raise SystemExit("Archive does not contain a date directory")
+
+    return tmp, dirs[0]
+
+
+def archive_date_from_name(path):
+    name = path.name
+    # vast-daily-2026-06-22.txz
+    if name.startswith("vast-daily-") and name.endswith(".txz"):
+        return name[len("vast-daily-"):-len(".txz")]
+    return dt.date.today().isoformat()
+
+
+def normalize_gpu_name(value):
+    return str(value or "").replace("_", " ").strip()
+
+
+def normalize_gpu_key(value):
+    return str(value or "").replace(" ", "_").strip()
+
+
+def parse_iso_z(value):
+    if not value:
+        return None
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return dt.datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def get_earnings_hours(earnings_json):
+    if not earnings_json:
+        return 24.0
+
+    start = parse_iso_z(earnings_json.get("start_utc"))
+    end = parse_iso_z(earnings_json.get("end_utc"))
+
+    if not start or not end:
+        return 24.0
+
+    seconds = (end - start).total_seconds()
+    if seconds <= 0:
+        return 24.0
+
+    return seconds / 3600.0
+
+
+def offer_list(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("offers"), list):
+        return data["offers"]
+    return []
+
+
+def offer_prices(path):
+    data = read_json(path)
+    prices = []
+
+    for offer in offer_list(data):
+        price = offer.get("dph_total")
+        if price is None:
+            price = offer.get("discounted_dph_total")
+        if isinstance(price, (int, float)):
+            prices.append(float(price))
+
+    return sorted(prices)
+
+
+def rank_candidate(prices, candidate_total):
+    if not prices:
+        return None, 1
+
+    cheaper = sum(1 for p in prices if p < candidate_total)
+    return cheaper + 1, len(prices) + 1
+
+
+def summarize_status(rows, machine_id, observation_minutes):
+    rows = [r for r in rows if str(r.get("machine_id", "")) == str(machine_id)]
+
+    if not rows:
+        return {
+            "records": 0,
+            "d_count": 0,
+            "i_count": 0,
+            "x_count": 0,
+            "other_count": 0,
+            "occupancy_rate": None,
+            "idle_hours": None,
+            "observed_hours": 0.0,
+            "latest": {},
+            "on_demand": None,
+            "interruptible": None,
+        }
+
+    d_count = 0
+    i_count = 0
+    x_count = 0
+    other_count = 0
+
+    for row in rows:
+        occ = str(row.get("occupancy", "")).strip()
+        if occ == "D_":
+            d_count += 1
+        elif occ == "I_":
+            i_count += 1
+        elif occ == "x_":
+            x_count += 1
+        else:
+            other_count += 1
+
+    records = len(rows)
+    occupied = d_count + i_count
+    occupancy_rate = occupied / records if records else None
+    observed_hours = records * observation_minutes / 60.0
+    idle_hours = x_count * observation_minutes / 60.0
+
+    latest = rows[-1]
+
+    return {
+        "records": records,
+        "d_count": d_count,
+        "i_count": i_count,
+        "x_count": x_count,
+        "other_count": other_count,
+        "occupancy_rate": occupancy_rate,
+        "idle_hours": idle_hours,
+        "observed_hours": observed_hours,
+        "latest": latest,
+        "on_demand": safe_float(latest.get("on_demand_dph"), None),
+        "interruptible": safe_float(latest.get("interruptible_dph"), None),
+    }
+
+
+def latest_reliability(rows, machine_id):
+    rows = [r for r in rows if str(r.get("machine_id", "")) == str(machine_id)]
+    if not rows:
+        return None
+    return safe_float(rows[-1].get("reliability2"), None)
+
+
+def earnings_by_machine(rows):
+    result = {}
+    for row in rows:
+        if row.get("scope") != "machine":
+            continue
+
+        machine_id = str(row.get("machine_id", ""))
+        gpu = safe_float(row.get("gpu_earn"))
+        storage = safe_float(row.get("storage_earn"))
+        bwu = safe_float(row.get("bandwidth_up_earn"))
+        bwd = safe_float(row.get("bandwidth_down_earn"))
+        total = safe_float(row.get("total_earn"), gpu + storage + bwu + bwd)
+
+        result[machine_id] = {
+            "gpu_earn": gpu,
+            "storage_earn": storage,
+            "bandwidth_earn": bwu + bwd,
+            "total_earn": total,
+        }
+
+    return result
+
+
+def market_by_gpu(rows):
+    result = {}
+    for row in rows:
+        gpu = normalize_gpu_key(row.get("gpu"))
+        result[gpu] = {
+            "records": safe_int(row.get("records")),
+            "first_utc": row.get("first_utc", ""),
+            "last_utc": row.get("last_utc", ""),
+            "avg_rented_median": safe_float(row.get("avg_rented_median"), None),
+            "last_rented_median": safe_float(row.get("last_rented_median"), None),
+            "avg_available_median": safe_float(row.get("avg_available_median"), None),
+            "last_available_median": safe_float(row.get("last_available_median"), None),
+            "avg_market_utilization": safe_float(row.get("avg_market_utilization"), None),
+            "last_market_utilization": safe_float(row.get("last_market_utilization"), None),
+        }
+    return result
+
+
+def choose_recommendation(machine_cfg, status, reliability, baseline):
+    current = status["on_demand"]
+    if current is None:
+        current = safe_float(machine_cfg.get("current_on_demand"), None)
+
+    if current is None:
+        return {
+            "action": "unknown",
+            "recommended_on_demand": None,
+            "reason": "current price is unknown",
+        }
+
+    candidates = sorted(float(x) for x in machine_cfg.get("candidate_on_demand", []))
+    lower_candidates = [x for x in candidates if x < current]
+    higher_candidates = [x for x in candidates if x > current]
+
+    previous_effective = safe_float(baseline.get("previous_effective_gpu_dph"), None)
+    gpu_effective = current * (status["occupancy_rate"] or 0.0)
+
+    min_rel = safe_float(machine_cfg.get("min_reliability_for_raise"), 1.0)
+    target_occ = safe_float(machine_cfg.get("target_occupancy_for_raise"), 1.0)
+    max_idle = safe_float(machine_cfg.get("max_idle_hours_before_cut"), 999.0)
+
+    if (
+        higher_candidates
+        and status["occupancy_rate"] is not None
+        and reliability is not None
+        and status["occupancy_rate"] >= target_occ
+        and reliability >= min_rel
+    ):
+        return {
+            "action": "consider_raise",
+            "recommended_on_demand": higher_candidates[0],
+            "reason": (
+                f"稼働率が{fmt_pct(status['occupancy_rate'])}で、"
+                f"Reliability {reliability:.4f} が値上げ条件を満たしています。"
+            ),
+        }
+
+    if (
+        lower_candidates
+        and status["idle_hours"] is not None
+        and status["idle_hours"] >= max_idle
+        and previous_effective is not None
+        and gpu_effective < previous_effective
+    ):
+        return {
+            "action": "watch_lower",
+            "recommended_on_demand": lower_candidates[-1],
+            "reason": (
+                f"空き時間が{status['idle_hours']:.1f}hあり、"
+                f"GPU実効{fmt_money(gpu_effective)}が基準{fmt_money(previous_effective)}未満です。"
+                "ただし即値下げではなく、次回も同傾向なら検討です。"
+            ),
+        }
+
+    return {
+        "action": "hold",
+        "recommended_on_demand": current,
+        "reason": "値上げ・値下げの明確な条件には達していません。",
+    }
+
+
+def markdown_table(headers, rows):
+    out = []
+    out.append("| " + " | ".join(headers) + " |")
+    out.append("|" + "|".join(["---"] * len(headers)) + "|")
+    for row in rows:
+        out.append("| " + " | ".join(str(x) for x in row) + " |")
+    return "\n".join(out)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--archive", help="Path to vast-daily-YYYY-MM-DD.txz")
+    parser.add_argument("--latest", action="store_true", help="Use latest archive")
+    parser.add_argument("--config", default="config.yaml")
+    args = parser.parse_args()
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        raise SystemExit(f"config not found: {config_path}")
+
+    with config_path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    if args.archive:
+        archive_path = Path(args.archive)
+    else:
+        archive_path = find_latest_archive(config["archive_dir"])
+
+    report_date = archive_date_from_name(archive_path)
+
+    tmp, data_dir = extract_archive(archive_path)
+
+    try:
+        status_rows = read_tsv(data_dir / "machine-status-last24h.tsv")
+        reliability_rows = read_tsv(data_dir / "reliability-last24h.tsv")
+        market_rows = read_tsv(data_dir / "gpu-market-summary.tsv")
+        earnings_rows = read_tsv(data_dir / "earnings-last24h-summary.tsv")
+        earnings_json = read_json(data_dir / "earnings-last24h.json")
+
+        earnings_hours = get_earnings_hours(earnings_json)
+        earnings_map = earnings_by_machine(earnings_rows)
+        market_map = market_by_gpu(market_rows)
+
+        observation_minutes = safe_float(
+            config.get("strategy", {}).get("observation_minutes"),
+            30.0,
+        )
+
+        report_dir = Path(config["report_dir"])
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        machine_reports = []
+        recommendations = {
+            "date": report_date,
+            "archive": str(archive_path),
+            "machines": {},
+        }
+
+        for machine_id, machine_cfg in config["machines"].items():
+            name = machine_cfg["name"]
+            gpu_key = machine_cfg["gpu_key"]
+
+            status = summarize_status(status_rows, machine_id, observation_minutes)
+            reliability = latest_reliability(reliability_rows, machine_id)
+
+            if reliability is None:
+                reliability = safe_float(status["latest"].get("reliability"), None)
+
+            earnings = earnings_map.get(str(machine_id), {})
+            market = market_map.get(gpu_key, {})
+
+            current_price = status["on_demand"]
+            if current_price is None:
+                current_price = safe_float(machine_cfg.get("current_on_demand"), None)
+
+            occupancy_rate = status["occupancy_rate"] or 0.0
+            gpu_effective_by_status = (
+                current_price * occupancy_rate
+                if current_price is not None
+                else None
+            )
+
+            gpu_earn_per_hour = None
+            total_earn_per_hour = None
+
+            if earnings:
+                gpu_earn_per_hour = earnings.get("gpu_earn", 0.0) / earnings_hours
+                total_earn_per_hour = earnings.get("total_earn", 0.0) / earnings_hours
+
+            baseline = config.get("baseline", {}).get(gpu_key, {})
+            recommendation = choose_recommendation(
+                machine_cfg,
+                status,
+                reliability,
+                baseline,
+            )
+
+            prices = offer_prices(data_dir / f"{gpu_key}-offers-price.json")
+            candidate_rows = []
+            storage_adjustment = safe_float(machine_cfg.get("storage_dph_adjustment"))
+
+            for candidate in machine_cfg.get("candidate_on_demand", []):
+                candidate = float(candidate)
+                candidate_total = candidate + storage_adjustment
+                rank, total = rank_candidate(prices, candidate_total)
+                candidate_rows.append({
+                    "candidate": candidate,
+                    "estimated_total": candidate_total,
+                    "rank": rank,
+                    "total": total,
+                })
+
+            machine_report = {
+                "machine_id": machine_id,
+                "name": name,
+                "gpu_key": gpu_key,
+                "status": status,
+                "reliability": reliability,
+                "earnings": earnings,
+                "earnings_hours": earnings_hours,
+                "gpu_effective_by_status": gpu_effective_by_status,
+                "gpu_earn_per_hour": gpu_earn_per_hour,
+                "total_earn_per_hour": total_earn_per_hour,
+                "market": market,
+                "candidate_rows": candidate_rows,
+                "recommendation": recommendation,
+            }
+
+            machine_reports.append(machine_report)
+
+            recommendations["machines"][machine_id] = {
+                "name": name,
+                "current_on_demand": current_price,
+                "recommended_on_demand": recommendation["recommended_on_demand"],
+                "action": recommendation["action"],
+                "reason": recommendation["reason"],
+                "occupancy_rate": status["occupancy_rate"],
+                "idle_hours": status["idle_hours"],
+                "reliability": reliability,
+                "gpu_effective_by_status": gpu_effective_by_status,
+                "gpu_earn_per_hour": gpu_earn_per_hour,
+                "total_earn_per_hour": total_earn_per_hour,
+                "candidate_prices": candidate_rows,
+            }
+
+        lines = []
+        lines.append(f"# Vast.ai 日次レポート {report_date}")
+        lines.append("")
+        lines.append(f"- Archive: `{archive_path}`")
+        lines.append(f"- Earnings集計時間: 約 {earnings_hours:.2f} h")
+        lines.append("")
+
+        lines.append("## 結論")
+        conclusion_rows = []
+        for m in machine_reports:
+            rec = m["recommendation"]
+            current = m["status"]["on_demand"]
+            conclusion_rows.append([
+                m["name"],
+                fmt_money(current),
+                fmt_money(rec["recommended_on_demand"]),
+                rec["action"],
+                rec["reason"],
+            ])
+        lines.append(markdown_table(
+            ["GPU", "現在On-demand", "推奨On-demand", "判断", "理由"],
+            conclusion_rows,
+        ))
+        lines.append("")
+
+        lines.append("## 直近24h実績")
+        rows = []
+        for m in machine_reports:
+            s = m["status"]
+            rows.append([
+                m["name"],
+                s["records"],
+                s["d_count"],
+                s["i_count"],
+                s["x_count"],
+                fmt_pct(s["occupancy_rate"]),
+                f"{s['idle_hours']:.1f}h" if s["idle_hours"] is not None else "-",
+                fmt_money(m["gpu_effective_by_status"]),
+                fmt_money(m["gpu_earn_per_hour"]),
+                fmt_money(m["total_earn_per_hour"]),
+                f"{m['reliability']:.4f}" if m["reliability"] is not None else "-",
+            ])
+        lines.append(markdown_table(
+            [
+                "GPU",
+                "records",
+                "D_",
+                "I_",
+                "x_",
+                "稼働率",
+                "空き時間",
+                "価格×稼働率",
+                "GPU収益/h",
+                "総収益/h",
+                "Reliability",
+            ],
+            rows,
+        ))
+        lines.append("")
+
+        lines.append("## 市場状況")
+        rows = []
+        for m in machine_reports:
+            market = m["market"]
+            rows.append([
+                m["name"],
+                fmt_money(market.get("avg_rented_median")),
+                fmt_money(market.get("last_rented_median")),
+                fmt_money(market.get("avg_available_median")),
+                fmt_money(market.get("last_available_median")),
+                fmt_pct(market.get("avg_market_utilization")),
+                fmt_pct(market.get("last_market_utilization")),
+            ])
+        lines.append(markdown_table(
+            [
+                "GPU",
+                "平均Rented Median",
+                "最新Rented Median",
+                "平均Available Median",
+                "最新Available Median",
+                "平均市場稼働率",
+                "最新市場稼働率",
+            ],
+            rows,
+        ))
+        lines.append("")
+
+        lines.append("## 候補価格の価格順位")
+        for m in machine_reports:
+            lines.append(f"### {m['name']}")
+            rows = []
+            for c in m["candidate_rows"]:
+                rows.append([
+                    fmt_money(c["candidate"], 3),
+                    fmt_money(c["estimated_total"], 5),
+                    f"{c['rank']} / {c['total']}" if c["rank"] is not None else "-",
+                ])
+            lines.append(markdown_table(
+                ["候補GPU価格", "推定dph_total", "空きOffer内順位"],
+                rows,
+            ))
+            lines.append("")
+
+        lines.append("## メモ")
+        lines.append("")
+        lines.append("- 価格変更は自動実行していません。")
+        lines.append("- `価格×稼働率` はGPU価格ベースの概算です。")
+        lines.append("- `GPU収益/h` と `総収益/h` はVast.ai Earnings由来です。")
+        lines.append("- Reliability評価には `reliability-last24h.tsv` を使っています。")
+        lines.append("")
+
+        report_path = report_dir / f"report-{report_date}.md"
+        rec_path = report_dir / f"recommendation-{report_date}.json"
+
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+
+        with rec_path.open("w", encoding="utf-8") as f:
+            json.dump(recommendations, f, ensure_ascii=False, indent=2)
+
+        print(f"Report written: {report_path}")
+        print(f"Recommendation written: {rec_path}")
+
+    finally:
+        tmp.cleanup()
+
+
+if __name__ == "__main__":
+    main()

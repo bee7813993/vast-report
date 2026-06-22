@@ -1,0 +1,96 @@
+{
+  "date": "2026-06-22",
+  "archive": "/home/bee/vast-daily/vast-daily-2026-06-22.txz",
+  "machines": {
+    "28351": {
+      "name": "RTX 5090",
+      "current_on_demand": 0.37999999999999995,
+      "recommended_on_demand": 0.37999999999999995,
+      "action": "hold",
+      "reason": "値上げ・値下げの明確な条件には達していません。",
+      "occupancy_rate": 0.8541666666666666,
+      "idle_hours": 3.5,
+      "reliability": 0.9740447,
+      "gpu_effective_by_status": 0.3245833333333333,
+      "gpu_earn_per_hour": 0.32126859193240354,
+      "total_earn_per_hour": 0.4096070374442965,
+      "candidate_prices": [
+        {
+          "candidate": 0.37,
+          "estimated_total": 0.37035,
+          "rank": 1,
+          "total": 59
+        },
+        {
+          "candidate": 0.38,
+          "estimated_total": 0.38035,
+          "rank": 1,
+          "total": 59
+        },
+        {
+          "candidate": 0.39,
+          "estimated_total": 0.39035000000000003,
+          "rank": 1,
+          "total": 59
+        },
+        {
+          "candidate": 0.4,
+          "estimated_total": 0.40035000000000004,
+          "rank": 1,
+          "total": 59
+        },
+        {
+          "candidate": 0.405,
+          "estimated_total": 0.40535000000000004,
+          "rank": 8,
+          "total": 59
+        },
+        {
+          "candidate": 0.41,
+          "estimated_total": 0.41035,
+          "rank": 8,
+          "total": 59
+        }
+      ]
+    },
+    "35058": {
+      "name": "RTX 3090",
+      "current_on_demand": 0.145,
+      "recommended_on_demand": 0.15,
+      "action": "consider_raise",
+      "reason": "稼働率が100.0%で、Reliability 0.9949 が値上げ条件を満たしています。",
+      "occupancy_rate": 1.0,
+      "idle_hours": 0.0,
+      "reliability": 0.9948941,
+      "gpu_effective_by_status": 0.145,
+      "gpu_earn_per_hour": 0.16667631228659066,
+      "total_earn_per_hour": 0.18001041726951794,
+      "candidate_prices": [
+        {
+          "candidate": 0.14,
+          "estimated_total": 0.14104000000000003,
+          "rank": 4,
+          "total": 37
+        },
+        {
+          "candidate": 0.145,
+          "estimated_total": 0.14604,
+          "rank": 4,
+          "total": 37
+        },
+        {
+          "candidate": 0.15,
+          "estimated_total": 0.15104,
+          "rank": 9,
+          "total": 37
+        },
+        {
+          "candidate": 0.16,
+          "estimated_total": 0.16104000000000002,
+          "rank": 12,
+          "total": 37
+        }
+      ]
+    }
+  }
+}

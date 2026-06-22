@@ -1,0 +1,47 @@
+timezone: Asia/Tokyo
+
+archive_dir: /home/bee/vast-daily
+report_dir: /home/bee/vast-report/reports
+
+baseline:
+  RTX_5090:
+    previous_effective_gpu_dph: 0.33
+  RTX_3090:
+    previous_effective_gpu_dph: 0.11
+
+machines:
+  "28351":
+    name: RTX 5090
+    gpu_key: RTX_5090
+    current_on_demand: 0.38
+    current_interruptible: 0.30
+    storage_dph_adjustment: 0.00035
+    candidate_on_demand:
+      - 0.37
+      - 0.38
+      - 0.39
+      - 0.40
+      - 0.405
+      - 0.41
+    min_reliability_for_raise: 0.98
+    target_occupancy_for_raise: 0.90
+    max_idle_hours_before_cut: 4.0
+
+  "35058":
+    name: RTX 3090
+    gpu_key: RTX_3090
+    current_on_demand: 0.145
+    current_interruptible: 0.12
+    storage_dph_adjustment: 0.00104
+    candidate_on_demand:
+      - 0.14
+      - 0.145
+      - 0.15
+      - 0.16
+    min_reliability_for_raise: 0.994
+    target_occupancy_for_raise: 0.95
+    max_idle_hours_before_cut: 4.0
+
+strategy:
+  observation_minutes: 30
+  auto_apply_price_change: false

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+REPORT_DIR="/home/bee/vast-report/reports"
+
+LATEST_REPORT="$(
+    ls -1 "$REPORT_DIR"/report-*.md 2>/dev/null |
+    sort |
+    tail -n 1
+)"
+
+if [[ -z "${LATEST_REPORT:-}" || ! -s "$LATEST_REPORT" ]]; then
+    echo "No report found" >&2
+    exit 1
+fi
+
+cat "$LATEST_REPORT"
