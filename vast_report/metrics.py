@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -156,6 +157,67 @@ def earnings_by_machine(rows: list[dict[str, str]]) -> dict[str, dict[str, float
         current["storage_earn"] += storage
         current["bandwidth_earn"] += bandwidth_up + bandwidth_down
         current["total_earn"] += total
+    return result
+
+
+def summarize_earnings(rows: list[dict[str, str]]) -> dict[str, Any]:
+    machine_rows = [row for row in rows if row.get("scope") == "machine"]
+    day_rows = [row for row in rows if row.get("scope") == "day"]
+    machines = earnings_by_machine(machine_rows)
+    day = _sum_earning_rows(day_rows)
+
+    machine_totals = _sum_earning_dicts(machines.values())
+    machine_all_zero = bool(machine_rows) and not _has_earnings(machine_totals)
+    day_has_earnings = _has_earnings(day)
+
+    return {
+        "machines": machines,
+        "day": day,
+        "machine_all_zero": machine_all_zero,
+        "day_has_earnings": day_has_earnings,
+        "suppress_machine_earnings": machine_all_zero and day_has_earnings,
+    }
+
+
+def _sum_earning_dicts(rows: Iterable[dict[str, float]]) -> dict[str, float]:
+    result = {
+        "gpu_earn": 0.0,
+        "storage_earn": 0.0,
+        "bandwidth_earn": 0.0,
+        "total_earn": 0.0,
+    }
+    for row in rows:
+        result["gpu_earn"] += row.get("gpu_earn", 0.0)
+        result["storage_earn"] += row.get("storage_earn", 0.0)
+        result["bandwidth_earn"] += row.get("bandwidth_earn", 0.0)
+        result["total_earn"] += row.get("total_earn", 0.0)
+    return result
+
+
+def _has_earnings(row: dict[str, float]) -> bool:
+    return any(abs(value) >= 1e-12 for value in row.values())
+
+
+def _sum_earning_rows(rows: list[dict[str, str]]) -> dict[str, float]:
+    result = {
+        "gpu_earn": 0.0,
+        "storage_earn": 0.0,
+        "bandwidth_earn": 0.0,
+        "total_earn": 0.0,
+    }
+    for row in rows:
+        gpu = safe_float(row.get("gpu_earn"), 0.0) or 0.0
+        storage = safe_float(row.get("storage_earn"), 0.0) or 0.0
+        bandwidth_up = safe_float(row.get("bandwidth_up_earn"), 0.0) or 0.0
+        bandwidth_down = safe_float(row.get("bandwidth_down_earn"), 0.0) or 0.0
+        total = safe_float(row.get("total_earn"), None)
+        if total is None:
+            total = gpu + storage + bandwidth_up + bandwidth_down
+
+        result["gpu_earn"] += gpu
+        result["storage_earn"] += storage
+        result["bandwidth_earn"] += bandwidth_up + bandwidth_down
+        result["total_earn"] += total
     return result
 
 

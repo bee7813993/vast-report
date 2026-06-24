@@ -13,6 +13,7 @@ def choose_recommendation(
     status: dict[str, Any],
     reliability: float | None,
     gpu_effective_by_status: float | None,
+    candidate_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     current = safe_float(status.get("on_demand"), None)
     if current is None:
@@ -69,6 +70,33 @@ def choose_recommendation(
             ),
         }
 
+    soft_raise = _soft_raise_candidate(
+        current=current,
+        candidate_rows=candidate_rows or [],
+    )
+    if (
+        soft_raise is not None
+        and occupancy_rate is not None
+        and idle_hours is not None
+        and reliability is not None
+        and min_reliability is not None
+        and occupancy_rate >= 1.0 - EPSILON
+        and idle_hours <= EPSILON
+        and reliability >= min_reliability - 0.005
+    ):
+        return {
+            "action": "consider_raise_soft",
+            "recommended_on_demand": soft_raise["candidate"],
+            "reason": (
+                f"稼働率 100.0%、空き時間 0.0h で、Reliability "
+                f"{reliability:.4f} が通常閾値 {min_reliability:.4f} の"
+                "近傍です。候補価格を上げても空きOffer内順位が "
+                f"{soft_raise['current_rank']} / {soft_raise['total']} から "
+                f"{soft_raise['candidate_rank']} / {soft_raise['total']} に"
+                "悪化しないため、弱い値上げ候補として提案します。"
+            ),
+        }
+
     if (
         lower_candidates
         and idle_hours is not None
@@ -98,3 +126,43 @@ def choose_recommendation(
         "recommended_on_demand": current,
         "reason": reason,
     }
+
+
+def _soft_raise_candidate(
+    current: float, candidate_rows: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    sorted_rows = sorted(
+        (
+            row
+            for row in candidate_rows
+            if safe_float(row.get("candidate"), None) is not None
+        ),
+        key=lambda row: safe_float(row.get("candidate"), 0.0) or 0.0,
+    )
+    current_index = None
+    for index, row in enumerate(sorted_rows):
+        candidate = safe_float(row.get("candidate"), None)
+        if candidate is not None and abs(candidate - current) <= EPSILON:
+            current_index = index
+            break
+    if current_index is None:
+        return None
+
+    current_rank = sorted_rows[current_index].get("rank")
+    total = sorted_rows[current_index].get("total")
+    if current_rank is None or total is None:
+        return None
+
+    for row in sorted_rows[current_index + 1 : current_index + 3]:
+        candidate_rank = row.get("rank")
+        candidate = safe_float(row.get("candidate"), None)
+        if candidate_rank is None or candidate is None:
+            continue
+        if candidate_rank <= current_rank:
+            return {
+                "candidate": candidate,
+                "current_rank": current_rank,
+                "candidate_rank": candidate_rank,
+                "total": row.get("total", total),
+            }
+    return None

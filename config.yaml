@@ -2,6 +2,7 @@ timezone: Asia/Tokyo
 
 archive_dir: /home/bee/vast-daily
 report_dir: reports
+state_file: state/machine-contract-state.json
 
 machines:
   "28351":

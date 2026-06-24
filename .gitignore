@@ -7,3 +7,4 @@ reports/*.tmp
 reports/report-*.md
 reports/recommendation-*.json
 samples/*.txz
+state/

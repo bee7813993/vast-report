@@ -44,13 +44,20 @@ def render_markdown(
     archive_path: Path,
     machine_reports: list[dict[str, Any]],
     earnings_hours: float,
+    host_total_earn_per_hour: float | None,
     warnings: list[str],
 ) -> str:
+    host_total_note = (
+        f"{fmt_money(host_total_earn_per_hour)} (day行由来)"
+        if host_total_earn_per_hour is not None
+        else "-"
+    )
     lines: list[str] = [
         f"# Vast.ai 日次レポート {report_date}",
         "",
         f"- Archive: `{archive_path}`",
         f"- Earnings集計時間: 約 {earnings_hours:.2f} h",
+        f"- ホスト全体 総収益/h: {host_total_note}",
         "- 価格変更: 自動実行していません",
         "",
         "## 結論",
@@ -62,7 +69,7 @@ def render_markdown(
         conclusion_rows.append(
             [
                 report["name"],
-                fmt_money(report["current_on_demand"]),
+                fmt_money(report["current_listed_on_demand"]),
                 fmt_money(rec["recommended_on_demand"]),
                 rec["action"],
                 rec["reason"],
@@ -70,7 +77,7 @@ def render_markdown(
         )
     lines.append(
         markdown_table(
-            ["GPU", "現在On-demand価格", "推奨On-demand価格", "判断", "理由"],
+            ["GPU", "現在Listed On-demand価格", "推奨On-demand価格", "判断", "理由"],
             conclusion_rows,
         )
     )
@@ -88,7 +95,11 @@ def render_markdown(
                 status["x_count"],
                 fmt_pct(status["occupancy_rate"]),
                 fmt_hours(status["idle_hours"]),
-                fmt_money(report["gpu_effective_by_status"]),
+                fmt_money(report["current_listed_on_demand"]),
+                fmt_money(report["active_contract_price_estimate"]),
+                report["active_contract_price_source"],
+                fmt_money(report["gpu_effective_by_listed_price"]),
+                fmt_money(report["gpu_effective_by_contract_estimate"]),
                 fmt_money(report["gpu_earn_per_hour"]),
                 fmt_money(report["total_earn_per_hour"]),
                 fmt_float(report["reliability"]),
@@ -104,7 +115,11 @@ def render_markdown(
                 "x_",
                 "稼働率",
                 "空き時間",
-                "価格×稼働率",
+                "Listed価格",
+                "契約価格推定",
+                "契約価格source",
+                "Listed価格×稼働率",
+                "契約価格×稼働率",
                 "GPU収益/h",
                 "総収益/h",
                 "Reliability",
@@ -174,7 +189,8 @@ def render_markdown(
             "## メモ",
             "",
             "- 価格変更は自動実行していません。",
-            "- 価格×稼働率は概算です。",
+            "- Listed価格×稼働率 と 契約価格×稼働率 は概算です。",
+            "- 契約価格推定は state/machine-contract-state.json の遷移履歴を使います。",
             "- GPU収益/h と 総収益/h は Vast.ai Earnings 由来です。",
             "- Reliability評価には reliability-last24h.tsv を使います。",
             "",
@@ -187,6 +203,7 @@ def recommendation_payload(
     report_date: str,
     archive_path: Path,
     machine_reports: list[dict[str, Any]],
+    host_total_earn_per_hour: float | None,
     warnings: list[str],
     auto_apply_price_change: bool,
 ) -> dict[str, Any]:
@@ -198,6 +215,12 @@ def recommendation_payload(
             "gpu_key": report["gpu_key"],
             "current_on_demand": report["current_on_demand"],
             "current_interruptible": report["current_interruptible"],
+            "current_listed_on_demand": report["current_listed_on_demand"],
+            "current_listed_interruptible": report["current_listed_interruptible"],
+            "active_contract_type": report["active_contract_type"],
+            "active_contract_started_at": report["active_contract_started_at"],
+            "active_contract_price_estimate": report["active_contract_price_estimate"],
+            "active_contract_price_source": report["active_contract_price_source"],
             "recommended_on_demand": recommendation["recommended_on_demand"],
             "action": recommendation["action"],
             "reason": recommendation["reason"],
@@ -205,6 +228,10 @@ def recommendation_payload(
             "idle_hours": report["status"]["idle_hours"],
             "reliability": report["reliability"],
             "gpu_effective_by_status": report["gpu_effective_by_status"],
+            "gpu_effective_by_listed_price": report["gpu_effective_by_listed_price"],
+            "gpu_effective_by_contract_estimate": report[
+                "gpu_effective_by_contract_estimate"
+            ],
             "gpu_earn_per_hour": report["gpu_earn_per_hour"],
             "total_earn_per_hour": report["total_earn_per_hour"],
             "candidate_prices": report["candidate_rows"],
@@ -219,6 +246,7 @@ def recommendation_payload(
         .isoformat()
         .replace("+00:00", "Z"),
         "auto_apply_price_change": auto_apply_price_change,
+        "host_total_earn_per_hour": host_total_earn_per_hour,
         "warnings": warnings,
         "machines": machines,
     }
