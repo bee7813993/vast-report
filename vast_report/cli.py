@@ -185,10 +185,20 @@ def analyze_data_dir(
     market_rows = read_tsv(data_dir / "gpu-market-summary.tsv", warnings)
     earnings_rows = read_tsv(data_dir / "earnings-last24h-summary.tsv", warnings)
     earnings_json = read_json(data_dir / "earnings-last24h.json", warnings)
+    machine_earnings_jsons = read_machine_earnings_jsons(
+        data_dir=data_dir,
+        machine_ids=config["machines"].keys(),
+        warnings=warnings,
+    )
 
     duration = earnings_hours(earnings_json, warnings)
     market_map = market_by_gpu(market_rows)
-    earnings_summary = summarize_earnings(earnings_rows)
+    earnings_summary = summarize_earnings(
+        earnings_rows,
+        earnings_json=earnings_json,
+        machine_earnings_jsons=machine_earnings_jsons,
+        machine_ids=config["machines"].keys(),
+    )
     earnings_map = earnings_summary["machines"]
     suppress_machine_earnings = earnings_summary["suppress_machine_earnings"]
     host_total_earn_per_hour = None
@@ -232,6 +242,44 @@ def analyze_data_dir(
         machine_reports.append(machine_report)
 
     return machine_reports, duration, host_total_earn_per_hour
+
+
+def read_machine_earnings_jsons(
+    data_dir: Path, machine_ids: Any, warnings: list[str]
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for machine_id in machine_ids:
+        machine_id = str(machine_id)
+        for path in machine_earnings_json_candidates(data_dir, machine_id):
+            if not path.exists():
+                continue
+            result[machine_id] = read_json(path, warnings)
+            break
+    return result
+
+
+def machine_earnings_json_candidates(data_dir: Path, machine_id: str) -> list[Path]:
+    names = [
+        f"earnings-last24h-machine-{machine_id}.json",
+        f"earnings-last24h-{machine_id}.json",
+        f"machine-{machine_id}-earnings-last24h.json",
+    ]
+
+    candidates = [data_dir / name for name in names]
+    for pattern in (
+        f"*earnings*last24h*{machine_id}*.json",
+        f"*{machine_id}*earnings*last24h*.json",
+    ):
+        candidates.extend(sorted(data_dir.glob(pattern)))
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        if path in seen or "raw" in path.name.lower():
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
 
 
 def analyze_machine(
@@ -311,6 +359,9 @@ def analyze_machine(
         reliability=reliability,
         gpu_effective_by_status=gpu_effective_by_status,
         candidate_rows=candidate_rows,
+        active_contract_price_estimate=active_contract_price_estimate,
+        active_contract_price_source=active_contract_price_source,
+        current_listed_on_demand=current_on_demand,
     )
 
     return {

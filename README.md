@@ -59,11 +59,27 @@ reports/report-YYYY-MM-DD.md
 reports/recommendation-YYYY-MM-DD.json
 ```
 
+## Earnings集計
+
+machine別Earningsは、次の優先順位で集計します。
+
+1. `earnings-last24h.json` またはmachine別Earnings JSONの `per_machine` に一致する `machine_id` があれば、それを使います。
+2. 一致する `per_machine` がない場合のみ、machine別Earnings JSONの `summary.total_gpu` / `summary.total_stor` / `summary.total_bwu` / `summary.total_bwd` を使います。
+3. 後方互換のfallbackとして `earnings-last24h-summary.tsv` の `scope=machine` を使います。
+
+`--machine_id` 指定時の `per_day` はhost全体の値になり得るため、machine別集計には使いません。
+host全体のEarnings集計は、従来どおり全体取得の `per_day` を使います。
+Earningsレスポンス内の `reliability` は価格判断に使わず、価格判断用のReliabilityは `reliability-last24h.tsv` を使います。
+
+アーカイブ内のmachine別Earnings JSONは、`earnings-last24h-machine-<machine_id>.json`、`earnings-last24h-<machine_id>.json`、`machine-<machine_id>-earnings-last24h.json` の名前を認識します。
+
 Markdownレポートには、ホスト全体の総収益/h、結論、直近24時間実績、市場状況、候補価格の競合順位、Warnings、メモを出します。直近24時間実績では、現在のListed価格と、状態ファイルから推定した契約価格を分けて表示します。
 
 JSON推奨設定には、マシンごとの現在価格、推奨価格、判断、理由、稼働率、収益/h、候補価格順位を出します。
 
 判断は `hold`、`consider_raise`、`consider_raise_soft`、`watch_lower`、`lower`、`unknown` のいずれかです。`consider_raise_soft` は稼働率100%、空き時間0、Reliabilityが通常閾値の近傍、かつ1段上または2段上の候補価格でも競合順位が悪化しない場合の弱い値上げ提案です。
+
+値上げ・値下げ注意の実績評価では、現在のListed価格ではなく、可能な限り `active_contract_price_estimate` を使います。次に設定すべき価格や候補価格順位はListed価格と候補価格を基準に扱います。
 
 ## 最新レポート表示
 
