@@ -297,7 +297,16 @@ def _add_earnings(
 
 
 def _earnings_from_mapping(row: dict[str, Any]) -> dict[str, float]:
-    gpu = _first_float(row, ("gpu_earn", "total_gpu", "gpu"), 0.0) or 0.0
+    gpu = _first_float(row, ("gpu_earn", "total_gpu", "gpu"), None)
+    # Vast API component rows use total_earn for GPU earnings, unlike the TSV.
+    api_total_earn_is_gpu = gpu is None and any(
+        key in row for key in ("total_stor", "total_bwu", "total_bwd")
+    )
+    if api_total_earn_is_gpu:
+        gpu = _first_float(row, ("total_earn",), 0.0)
+    if gpu is None:
+        gpu = 0.0
+
     storage = (
         _first_float(row, ("storage_earn", "total_stor", "stor_earn", "storage"), 0.0)
         or 0.0
@@ -314,7 +323,8 @@ def _earnings_from_mapping(row: dict[str, Any]) -> dict[str, float]:
         )
         bandwidth = bandwidth_up + bandwidth_down
 
-    total = _first_float(row, ("total_earn", "total"), None)
+    total_names = ("total",) if api_total_earn_is_gpu else ("total_earn", "total")
+    total = _first_float(row, total_names, None)
     if total is None:
         total = gpu + storage + bandwidth
 

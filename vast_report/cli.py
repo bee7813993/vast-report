@@ -97,7 +97,12 @@ def main(argv: list[str] | None = None) -> None:
         if (data_dir / "earnings-last24h.raw.json").exists():
             warnings.append("Ignoring earnings-last24h.raw.json by policy")
 
-        machine_reports, earnings_duration, host_total_earn_per_hour = analyze_data_dir(
+        (
+            machine_reports,
+            earnings_duration,
+            host_gpu_earn_per_hour,
+            host_total_earn_per_hour,
+        ) = analyze_data_dir(
             data_dir=data_dir,
             config=config,
             contract_state=contract_state,
@@ -121,6 +126,7 @@ def main(argv: list[str] | None = None) -> None:
         archive_path=archive_path,
         machine_reports=machine_reports,
         earnings_hours=earnings_duration,
+        host_gpu_earn_per_hour=host_gpu_earn_per_hour,
         host_total_earn_per_hour=host_total_earn_per_hour,
         warnings=warnings,
     )
@@ -128,6 +134,7 @@ def main(argv: list[str] | None = None) -> None:
         report_date=report_date,
         archive_path=archive_path,
         machine_reports=machine_reports,
+        host_gpu_earn_per_hour=host_gpu_earn_per_hour,
         host_total_earn_per_hour=host_total_earn_per_hour,
         warnings=warnings,
         auto_apply_price_change=auto_apply,
@@ -179,7 +186,7 @@ def analyze_data_dir(
     config: dict[str, Any],
     contract_state: dict[str, Any],
     warnings: list[str],
-) -> tuple[list[dict[str, Any]], float, float | None]:
+) -> tuple[list[dict[str, Any]], float, float | None, float | None]:
     status_rows = read_tsv(data_dir / "machine-status-last24h.tsv", warnings)
     reliability_rows = read_tsv(data_dir / "reliability-last24h.tsv", warnings)
     market_rows = read_tsv(data_dir / "gpu-market-summary.tsv", warnings)
@@ -201,14 +208,17 @@ def analyze_data_dir(
     )
     earnings_map = earnings_summary["machines"]
     suppress_machine_earnings = earnings_summary["suppress_machine_earnings"]
+    host_gpu_earn_per_hour = None
     host_total_earn_per_hour = None
     if earnings_summary["day_has_earnings"] and duration > 0:
+        host_gpu_earn_per_hour = earnings_summary["day"]["gpu_earn"] / duration
         host_total_earn_per_hour = earnings_summary["day"]["total_earn"] / duration
     if suppress_machine_earnings:
         warnings.append(
             "earnings-last24h-summary.tsv has zero machine earnings but non-zero "
             "day earnings; machine GPU収益/h and 総収益/h are shown as '-' and "
-            "host total_earn_per_hour is calculated from day rows"
+            "host_gpu_earn_per_hour and host_total_earn_per_hour are calculated "
+            "from day rows"
         )
     observation_minutes = safe_float(
         config.get("strategy", {}).get("observation_minutes"), 30.0
@@ -241,7 +251,12 @@ def analyze_data_dir(
         )
         machine_reports.append(machine_report)
 
-    return machine_reports, duration, host_total_earn_per_hour
+    return (
+        machine_reports,
+        duration,
+        host_gpu_earn_per_hour,
+        host_total_earn_per_hour,
+    )
 
 
 def read_machine_earnings_jsons(

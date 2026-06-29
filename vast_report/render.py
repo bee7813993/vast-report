@@ -44,9 +44,15 @@ def render_markdown(
     archive_path: Path,
     machine_reports: list[dict[str, Any]],
     earnings_hours: float,
+    host_gpu_earn_per_hour: float | None,
     host_total_earn_per_hour: float | None,
     warnings: list[str],
 ) -> str:
+    host_gpu_note = (
+        f"{fmt_money(host_gpu_earn_per_hour)} (day行由来)"
+        if host_gpu_earn_per_hour is not None
+        else "-"
+    )
     host_total_note = (
         f"{fmt_money(host_total_earn_per_hour)} (day行由来)"
         if host_total_earn_per_hour is not None
@@ -57,6 +63,7 @@ def render_markdown(
         "",
         f"- Archive: `{archive_path}`",
         f"- Earnings集計時間: 約 {earnings_hours:.2f} h",
+        f"- ホスト全体 GPU収益/h: {host_gpu_note}",
         f"- ホスト全体 総収益/h: {host_total_note}",
         "- 価格変更: 自動実行していません",
         "",
@@ -203,6 +210,7 @@ def recommendation_payload(
     report_date: str,
     archive_path: Path,
     machine_reports: list[dict[str, Any]],
+    host_gpu_earn_per_hour: float | None,
     host_total_earn_per_hour: float | None,
     warnings: list[str],
     auto_apply_price_change: bool,
@@ -246,6 +254,7 @@ def recommendation_payload(
         .isoformat()
         .replace("+00:00", "Z"),
         "auto_apply_price_change": auto_apply_price_change,
+        "host_gpu_earn_per_hour": host_gpu_earn_per_hour,
         "host_total_earn_per_hour": host_total_earn_per_hour,
         "warnings": warnings,
         "machines": machines,

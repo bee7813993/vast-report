@@ -68,12 +68,12 @@ machine別Earningsは、次の優先順位で集計します。
 3. 後方互換のfallbackとして `earnings-last24h-summary.tsv` の `scope=machine` を使います。
 
 `--machine_id` 指定時の `per_day` はhost全体の値になり得るため、machine別集計には使いません。
-host全体のEarnings集計は、従来どおり全体取得の `per_day` を使います。
+host全体のEarnings集計は、従来どおり全体取得の `per_day` を使います。Vast API形式の `per_day.total_earn` はGPU収益として扱い、ストレージ・帯域収益を加えた総収益と分けて、`host_gpu_earn_per_hour` / `host_total_earn_per_hour` を出力します。
 Earningsレスポンス内の `reliability` は価格判断に使わず、価格判断用のReliabilityは `reliability-last24h.tsv` を使います。
 
 アーカイブ内のmachine別Earnings JSONは、`earnings-last24h-machine-<machine_id>.json`、`earnings-last24h-<machine_id>.json`、`machine-<machine_id>-earnings-last24h.json` の名前を認識します。
 
-Markdownレポートには、ホスト全体の総収益/h、結論、直近24時間実績、市場状況、候補価格の競合順位、Warnings、メモを出します。直近24時間実績では、現在のListed価格と、状態ファイルから推定した契約価格を分けて表示します。
+Markdownレポートには、ホスト全体のGPU収益/hと総収益/h、結論、直近24時間実績、市場状況、候補価格の競合順位、Warnings、メモを出します。直近24時間実績では、現在のListed価格と、状態ファイルから推定した契約価格を分けて表示します。
 
 JSON推奨設定には、マシンごとの現在価格、推奨価格、判断、理由、稼働率、収益/h、候補価格順位を出します。
 
