@@ -29,6 +29,50 @@ class EarningsAggregationTests(unittest.TestCase):
         self.assertAlmostEqual(earnings["bandwidth_earn"], 0.10)
         self.assertAlmostEqual(earnings["total_earn"], 13.78)
 
+    def test_vast_per_day_short_component_names_are_summed(self) -> None:
+        earnings = earnings_day_total_json(
+            {
+                "per_day": [
+                    {
+                        "gpu_earn": 9.90,
+                        "sto_earn": 1.72,
+                        "bwu_earn": 0.17,
+                        "bwd_earn": 0.72,
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNotNone(earnings)
+        assert earnings is not None
+        self.assertAlmostEqual(earnings["gpu_earn"], 9.90)
+        self.assertAlmostEqual(earnings["storage_earn"], 1.72)
+        self.assertAlmostEqual(earnings["bandwidth_earn"], 0.89)
+        self.assertAlmostEqual(earnings["total_earn"], 12.51)
+
+    def test_vast_per_machine_short_component_names_are_summed(self) -> None:
+        summary = summarize_earnings(
+            [],
+            earnings_json={
+                "per_machine": [
+                    {
+                        "machine_id": "28351",
+                        "gpu_earn": 9.90,
+                        "sto_earn": 1.72,
+                        "bwu_earn": 0.17,
+                        "bwd_earn": 0.72,
+                    }
+                ]
+            },
+            machine_ids=["28351"],
+        )
+
+        earnings = summary["machines"]["28351"]
+        self.assertAlmostEqual(earnings["gpu_earn"], 9.90)
+        self.assertAlmostEqual(earnings["storage_earn"], 1.72)
+        self.assertAlmostEqual(earnings["bandwidth_earn"], 0.89)
+        self.assertAlmostEqual(earnings["total_earn"], 12.51)
+
     def test_tsv_total_earn_remains_explicit_total(self) -> None:
         summary = summarize_earnings(
             [

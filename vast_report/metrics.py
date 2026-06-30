@@ -300,7 +300,15 @@ def _earnings_from_mapping(row: dict[str, Any]) -> dict[str, float]:
     gpu = _first_float(row, ("gpu_earn", "total_gpu", "gpu"), None)
     # Vast API component rows use total_earn for GPU earnings, unlike the TSV.
     api_total_earn_is_gpu = gpu is None and any(
-        key in row for key in ("total_stor", "total_bwu", "total_bwd")
+        key in row
+        for key in (
+            "total_stor",
+            "total_bwu",
+            "total_bwd",
+            "sto_earn",
+            "bwu_earn",
+            "bwd_earn",
+        )
     )
     if api_total_earn_is_gpu:
         gpu = _first_float(row, ("total_earn",), 0.0)
@@ -308,17 +316,32 @@ def _earnings_from_mapping(row: dict[str, Any]) -> dict[str, float]:
         gpu = 0.0
 
     storage = (
-        _first_float(row, ("storage_earn", "total_stor", "stor_earn", "storage"), 0.0)
+        _first_float(
+            row,
+            ("storage_earn", "total_stor", "stor_earn", "sto_earn", "storage"),
+            0.0,
+        )
         or 0.0
     )
 
-    bandwidth = _first_float(row, ("bandwidth_earn", "bandwidth_total"), None)
+    bandwidth = _first_float(
+        row, ("bandwidth_earn", "bandwidth_total", "bwu_bwd_earn"), None
+    )
     if bandwidth is None:
         bandwidth_up = (
-            _first_float(row, ("bandwidth_up_earn", "total_bwu", "bwu"), 0.0) or 0.0
+            _first_float(
+                row,
+                ("bandwidth_up_earn", "total_bwu", "bwu_earn", "bwu"),
+                0.0,
+            )
+            or 0.0
         )
         bandwidth_down = (
-            _first_float(row, ("bandwidth_down_earn", "total_bwd", "bwd"), 0.0)
+            _first_float(
+                row,
+                ("bandwidth_down_earn", "total_bwd", "bwd_earn", "bwd"),
+                0.0,
+            )
             or 0.0
         )
         bandwidth = bandwidth_up + bandwidth_down
