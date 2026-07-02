@@ -73,6 +73,23 @@ Earningsレスポンス内の `reliability` は価格判断に使わず、価格
 
 アーカイブ内のmachine別Earnings JSONは、`earnings-last24h-machine-<machine_id>.json`、`earnings-last24h-<machine_id>.json`、`machine-<machine_id>-earnings-last24h.json` の名前を認識します。
 
+### machine別Earnings収集補助
+
+既存の収集スクリプト内で日次アーカイブ用の作業ディレクトリを作ったあと、tar化する前に次を実行すると、解析CLIが認識できるmachine別Earnings JSONを作れます。
+
+```bash
+cd /home/bee/vast-report
+bin/collect-machine-earnings --output-dir "$WORK_DIR" --machine-id 28351 --machine-id 35058
+```
+
+`--machine-id` を省略した場合は `config.yaml` の `machines` から対象IDを読みます。
+
+```bash
+bin/collect-machine-earnings --output-dir "$WORK_DIR" --config /home/bee/vast-report/config.yaml
+```
+
+この補助CLIは各マシンについて `vastai show earnings --machine_id <machine_id>` を実行し、`earnings-last24h-machine-<machine_id>.json` をatomic writeします。Vast.ai CLIのstdoutはメモリ上でJSON解析するだけで、`per_day` や未知のrawフィールドは保存しません。保存するのは `per_machine` の一致行、または一致行がない場合の `summary.total_gpu` / `summary.total_stor` / `summary.total_bwu` / `summary.total_bwd` など、集計に必要なキーだけです。
+
 Markdownレポートには、ホスト全体のGPU収益/hと総収益/h、結論、直近24時間実績、市場状況、候補価格の競合順位、Warnings、メモを出します。直近24時間実績では、現在のListed価格と、状態ファイルから推定した契約価格を分けて表示します。
 
 JSON推奨設定には、マシンごとの現在価格、推奨価格、判断、理由、稼働率、収益/h、候補価格順位を出します。
@@ -103,9 +120,11 @@ bin/send-vast-report --latest
 
 ```text
 bin/analyze-vast-daily        CLI入口
+bin/collect-machine-earnings  machine別Earnings収集補助
 bin/send-vast-report          最新Markdownを標準出力へ出す
 config.yaml                   マシンID、価格、候補価格、閾値
 vast_report/archive.py        .txz探索・安全展開
+vast_report/collect_machine_earnings.py machine別Earnings収集補助
 vast_report/config.py         設定読み込み
 vast_report/contract_state.py 契約価格推定stateの更新
 vast_report/loaders.py        TSV/JSON読み込み
