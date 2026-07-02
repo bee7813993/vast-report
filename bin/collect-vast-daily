@@ -1,0 +1,1424 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+PATH=/usr/local/bin:/usr/bin:/bin
+umask 022
+
+
+# =============================================================================
+# 設定
+# =============================================================================
+
+VASTAIPATH="${VASTAIPATH:-/usr/local/bin/vastai}"
+
+# 保存先
+BASE_DIR="${BASE_DIR:-$HOME/vast-daily}"
+
+# vast-report側の補助CLI
+VAST_REPORT_DIR="${VAST_REPORT_DIR:-/home/bee/vast-report}"
+MACHINE_EARNINGS_COLLECTOR="${MACHINE_EARNINGS_COLLECTOR:-${VAST_REPORT_DIR}/bin/collect-machine-earnings}"
+MACHINE_EARNINGS_CONFIG="${MACHINE_EARNINGS_CONFIG:-${VAST_REPORT_DIR}/config.yaml}"
+MACHINE_EARNINGS_MACHINE_IDS="${MACHINE_EARNINGS_MACHINE_IDS:-28351 35058}"
+COLLECT_MACHINE_EARNINGS="${COLLECT_MACHINE_EARNINGS:-1}"
+
+# 競合Offerの最大取得件数
+OFFER_LIMIT="${OFFER_LIMIT:-500}"
+
+# Offer取得失敗時のリトライ間隔
+OFFER_RETRY_SLEEP_SECONDS="${OFFER_RETRY_SLEEP_SECONDS:-10}"
+
+# 30分ごとの vastai_machinecheck_json.sh が生成するファイル
+STATUS_SOURCE="${STATUS_SOURCE:-/var/log/vastai_machine_status.tsv}"
+RELIABILITY_SOURCE="${RELIABILITY_SOURCE:-/var/log/vastai_reliability.tsv}"
+TEMPERATURE_SOURCE="${TEMPERATURE_SOURCE:-/var/log/vastai_gpu_temperature.tsv}"
+
+# 人間向け確認ログ
+HUMAN_LOG_SOURCE="${HUMAN_LOG_SOURCE:-/var/log/vastai_machinecheck.log}"
+
+# 同時実行防止
+LOCKFILE="${BASE_DIR}/.collect-vast-daily.lock"
+
+
+# =============================================================================
+# 今回の収集情報
+# =============================================================================
+
+DAY="$(date +%F)"
+COLLECTED_AT="$(date -Is)"
+COLLECTED_AT_UTC="$(date -u +%FT%TZ)"
+CUTOFF="$(date -d '24 hours ago' -Is)"
+
+FINAL_DIR="${BASE_DIR}/${DAY}"
+FINAL_ARCHIVE="${BASE_DIR}/vast-daily-${DAY}.txz"
+
+TMP_ROOT=""
+OUT=""
+FAILED=0
+
+
+# =============================================================================
+# 共通関数
+# =============================================================================
+
+cleanup() {
+    if [[ -n "${TMP_ROOT:-}" && -d "$TMP_ROOT" ]]; then
+        rm -rf "$TMP_ROOT"
+    fi
+}
+
+trap cleanup EXIT
+
+
+log_error() {
+    local message="$1"
+
+    printf '%s\t%s\n' \
+        "$(date -Is)" \
+        "$message" \
+        >> "${OUT}/collection-errors.log"
+
+    FAILED=1
+}
+
+
+require_command() {
+    local command_name="$1"
+
+    if [[ "$command_name" == */* ]]; then
+        if [[ ! -x "$command_name" ]]; then
+            echo "ERROR: executable not found: $command_name" >&2
+            exit 1
+        fi
+    elif ! command -v "$command_name" >/dev/null 2>&1; then
+        echo "ERROR: command not found: $command_name" >&2
+        exit 1
+    fi
+}
+
+
+capture_command() {
+    local output_file="$1"
+    shift
+
+    local stderr_file="${output_file}.stderr"
+    local status
+
+    if "$@" > "$output_file" 2> "$stderr_file"; then
+        if [[ ! -s "$stderr_file" ]]; then
+            rm -f "$stderr_file"
+        fi
+    else
+        status=$?
+
+        log_error \
+            "Command failed with status ${status}: $*"
+    fi
+
+    # 一部の収集に失敗しても、残りは続行する
+    return 0
+}
+
+
+validate_json() {
+    local json_file="$1"
+
+    if [[ ! -s "$json_file" ]]; then
+        log_error "JSON file is empty: ${json_file}"
+        return 0
+    fi
+
+    if ! jq -e . "$json_file" >/dev/null 2>&1; then
+        log_error "Invalid JSON: ${json_file}"
+    fi
+}
+
+
+extract_last_24h() {
+    local source_file="$1"
+    local destination_file="$2"
+
+    if [[ ! -r "$source_file" ]]; then
+        log_error "Cannot read source file: ${source_file}"
+        return 0
+    fi
+
+    awk \
+        -F '\t' \
+        -v cutoff="$CUTOFF" '
+            NR == 1 {
+                print
+                next
+            }
+
+            $1 >= cutoff {
+                print
+            }
+        ' "$source_file" > "$destination_file"
+}
+
+
+capture_offer_with_retry() {
+    local output_file="$1"
+    local query="$2"
+
+    local output_dir
+    local output_base
+    local retry_log
+
+    local attempt
+    local limit
+    local rc
+    local attempt_file
+    local attempt_stderr
+
+    output_dir="$(dirname "$output_file")"
+    output_base="$(basename "$output_file")"
+    retry_log="${OUT}/offer-retry.log"
+
+    rm -f "$output_file" "${output_file}.stderr"
+
+    attempt=0
+
+    # 1回目: OFFER_LIMIT
+    # 2回目: 同じ条件で再試行
+    # 3回目: limit 200
+    # 4回目: limit 100
+    #
+    # 3090は通常Offer数が数十件なので、limit 100でも実用上は足ります。
+    for limit in "$OFFER_LIMIT" "$OFFER_LIMIT" 200 100
+    do
+        attempt=$((attempt + 1))
+
+        attempt_file="${output_file}.attempt-${attempt}.json"
+        attempt_stderr="${output_file}.attempt-${attempt}.stderr"
+
+        rm -f "$attempt_file" "$attempt_stderr"
+
+        if [[ "$attempt" -gt 1 ]]; then
+            sleep "$OFFER_RETRY_SLEEP_SECONDS"
+        fi
+
+        {
+            echo "=== $(date -Is) ==="
+            echo "query=${query}"
+            echo "attempt=${attempt}"
+            echo "limit=${limit}"
+        } >> "$retry_log"
+
+        if env PYTHONNOUSERSITE=1 \
+            "$VASTAIPATH" search offers \
+            "$query" \
+            --limit "$limit" \
+            --raw \
+            > "$attempt_file" \
+            2> "$attempt_stderr"
+        then
+            rc=0
+        else
+            rc=$?
+        fi
+
+        echo "exit_status=${rc}" >> "$retry_log"
+
+        if [[ -s "$attempt_file" ]]; then
+            echo "stdout_bytes=$(wc -c < "$attempt_file")" >> "$retry_log"
+        else
+            echo "stdout_bytes=0" >> "$retry_log"
+        fi
+
+        if [[ -s "$attempt_stderr" ]]; then
+            echo "stderr_bytes=$(wc -c < "$attempt_stderr")" >> "$retry_log"
+            {
+                echo "--- stderr tail ---"
+                tail -n 20 "$attempt_stderr"
+            } >> "$retry_log"
+        else
+            echo "stderr_bytes=0" >> "$retry_log"
+        fi
+
+        if [[ "$rc" -eq 0 ]] &&
+           [[ -s "$attempt_file" ]] &&
+           jq -e . "$attempt_file" >/dev/null 2>&1 &&
+           jq -e '
+               if type == "array" then
+                   true
+               elif (
+                   type == "object"
+                   and has("offers")
+                   and ((.offers | type) == "array")
+               ) then
+                   true
+               else
+                   false
+               end
+           ' "$attempt_file" >/dev/null 2>&1
+        then
+            mv "$attempt_file" "$output_file"
+
+            if [[ -s "$attempt_stderr" ]]; then
+                mv "$attempt_stderr" "${output_file}.stderr"
+            else
+                rm -f "$attempt_stderr"
+            fi
+
+            {
+                echo "result=success"
+                echo
+            } >> "$retry_log"
+
+            # 成功したら過去attemptの残骸を削除
+            find "$output_dir" \
+                -maxdepth 1 \
+                -type f \
+                -name "${output_base}.attempt-*" \
+                -delete
+
+            return 0
+        fi
+
+        {
+            echo "result=failed_attempt"
+            echo
+        } >> "$retry_log"
+    done
+
+    log_error \
+        "Offer search failed after retries: query=${query}"
+
+    return 0
+}
+
+
+create_price_sorted_offer_file() {
+    local source_file="$1"
+    local destination_file="$2"
+    local stderr_file="${destination_file}.stderr"
+    local status
+
+    if [[ ! -s "$source_file" ]]; then
+        log_error \
+            "Cannot create price-sorted Offer file because source is empty: ${source_file}"
+        return 0
+    fi
+
+    if ! jq -e . "$source_file" >/dev/null 2>&1; then
+        log_error \
+            "Cannot create price-sorted Offer file because source JSON is invalid: ${source_file}"
+        return 0
+    fi
+
+    # Vast CLIの出力が直接配列の場合と、
+    # {"offers":[...]} 形式の場合の両方に対応。
+    #
+    # dph_totalがないOfferは末尾へ配置する。
+    if jq '
+        def offer_price:
+            (
+                .dph_total
+                //
+                .discounted_dph_total
+                //
+                1e100
+            );
+
+        if type == "array" then
+            sort_by(offer_price)
+
+        elif (
+            type == "object"
+            and has("offers")
+            and ((.offers | type) == "array")
+        ) then
+            .offers |= sort_by(offer_price)
+
+        else
+            error(
+                "Unexpected Vast.ai Offer JSON structure"
+            )
+        end
+    ' "$source_file" > "$destination_file" 2> "$stderr_file"
+    then
+        if [[ ! -s "$stderr_file" ]]; then
+            rm -f "$stderr_file"
+        fi
+    else
+        status=$?
+
+        log_error \
+            "Could not create price-sorted Offer file with status ${status}: ${source_file}"
+
+        rm -f "$destination_file"
+    fi
+
+    return 0
+}
+
+
+collect_machine_earnings() {
+    local stdout_file="${OUT}/machine-earnings-collector.log"
+    local stderr_file="${OUT}/machine-earnings-collector.stderr"
+    local -a args
+    local machine_id
+    local status
+
+    args=(
+        --output-dir "$OUT"
+        --vastai-bin "$VASTAIPATH"
+    )
+
+    if [[ -n "${MACHINE_EARNINGS_MACHINE_IDS// }" ]]; then
+        for machine_id in $MACHINE_EARNINGS_MACHINE_IDS
+        do
+            args+=(--machine-id "$machine_id")
+        done
+    else
+        args+=(--config "$MACHINE_EARNINGS_CONFIG")
+    fi
+
+    if "$MACHINE_EARNINGS_COLLECTOR" "${args[@]}" > "$stdout_file" 2> "$stderr_file"; then
+        if [[ ! -s "$stdout_file" ]]; then
+            rm -f "$stdout_file"
+        fi
+        if [[ ! -s "$stderr_file" ]]; then
+            rm -f "$stderr_file"
+        fi
+    else
+        status=$?
+
+        log_error \
+            "Machine earnings collection failed with status ${status}: ${MACHINE_EARNINGS_COLLECTOR}"
+
+        if [[ ! -s "$stdout_file" ]]; then
+            rm -f "$stdout_file"
+        fi
+    fi
+
+    return 0
+}
+
+
+# =============================================================================
+# 必要コマンド確認
+# =============================================================================
+
+require_command "$VASTAIPATH"
+require_command awk
+require_command basename
+require_command date
+require_command dirname
+require_command env
+require_command find
+require_command flock
+require_command head
+require_command hostname
+require_command jq
+require_command mktemp
+require_command sha256sum
+require_command sort
+require_command tail
+require_command tar
+require_command wc
+require_command xargs
+
+if [[ "$COLLECT_MACHINE_EARNINGS" == "1" ]]; then
+    require_command "$MACHINE_EARNINGS_COLLECTOR"
+fi
+
+
+# =============================================================================
+# 出力先とロック準備
+# =============================================================================
+
+mkdir -p "$BASE_DIR"
+
+exec 9> "$LOCKFILE"
+
+if ! flock -n 9; then
+    echo "Another collection process is already running." >&2
+    exit 1
+fi
+
+TMP_ROOT="$(mktemp -d "${BASE_DIR}/.tmp-${DAY}-XXXXXX")"
+OUT="${TMP_ROOT}/${DAY}"
+
+mkdir -p "$OUT"
+
+: > "${OUT}/collection-errors.log"
+
+
+# =============================================================================
+# 収集日時・環境情報
+# =============================================================================
+
+{
+    echo "collection_date=${DAY}"
+    echo "collected_at=${COLLECTED_AT}"
+    echo "collected_at_utc=${COLLECTED_AT_UTC}"
+    echo "last_24h_cutoff=${CUTOFF}"
+
+    echo "hostname=$(hostname -f 2>/dev/null || hostname)"
+    echo "user=$(id -un)"
+    echo "uid=$(id -u)"
+    echo "timezone=$(date +%Z)"
+
+    echo "offer_limit=${OFFER_LIMIT}"
+    echo "offer_retry_sleep_seconds=${OFFER_RETRY_SLEEP_SECONDS}"
+    echo "vastai_path=${VASTAIPATH}"
+    echo "vastai_python_usersite=disabled"
+    echo "offer_price_sort=local_jq_sort_from_same_default_search"
+    echo "collect_machine_earnings=${COLLECT_MACHINE_EARNINGS}"
+    echo "machine_earnings_collector=${MACHINE_EARNINGS_COLLECTOR}"
+    echo "machine_earnings_config=${MACHINE_EARNINGS_CONFIG}"
+    echo "machine_earnings_machine_ids=${MACHINE_EARNINGS_MACHINE_IDS}"
+
+    if env PYTHONNOUSERSITE=1 "$VASTAIPATH" --version >/dev/null 2>&1; then
+        printf 'vastai_version='
+        env PYTHONNOUSERSITE=1 "$VASTAIPATH" --version 2>&1 | head -n 1
+    fi
+
+} > "${OUT}/collection-info.txt"
+
+
+# =============================================================================
+# 現在の自ホスト情報
+# =============================================================================
+
+capture_command \
+    "${OUT}/machines.txt" \
+    env PYTHONNOUSERSITE=1 \
+    "$VASTAIPATH" show machines
+
+capture_command \
+    "${OUT}/machines.json" \
+    env PYTHONNOUSERSITE=1 \
+    "$VASTAIPATH" show machines --raw
+
+validate_json \
+    "${OUT}/machines.json"
+
+
+# =============================================================================
+# Market Metrics
+#
+# RTX 5090・RTX 3090の直近24時間を、
+# APIが返す細かい時間間隔のまま取得
+# =============================================================================
+
+MARKET_JSON="${OUT}/gpu-market-metrics.json"
+
+capture_command \
+    "$MARKET_JSON" \
+    env PYTHONNOUSERSITE=1 \
+    "$VASTAIPATH" metrics gpu-trends \
+    "RTX 5090,RTX 3090" \
+    --full \
+    --raw
+
+validate_json \
+    "$MARKET_JSON"
+
+
+# Market MetricsのJSON構造を確認
+
+if [[ -s "$MARKET_JSON" ]] &&
+   jq -e '
+       type == "object"
+       and has("RTX 5090")
+       and has("RTX 3090")
+       and ((.["RTX 5090"].rows | type) == "array")
+       and ((.["RTX 3090"].rows | type) == "array")
+   ' "$MARKET_JSON" >/dev/null 2>&1
+then
+    :
+else
+    log_error \
+        "GPU market metrics JSON does not have the expected structure"
+fi
+
+
+# =============================================================================
+# Earnings
+#
+# Vast.aiのearning履歴を取得します。
+# raw JSONには個人情報系フィールドが含まれ得るため、
+# アーカイブには summary / per_machine / per_day のみに削ったJSONを保存します。
+# =============================================================================
+
+EARNINGS_START_UTC="$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')"
+EARNINGS_END_UTC="$COLLECTED_AT_UTC"
+
+EARNINGS_RAW="${OUT}/earnings-last24h.raw.json"
+EARNINGS_JSON="${OUT}/earnings-last24h.json"
+EARNINGS_TSV="${OUT}/earnings-last24h-summary.tsv"
+
+capture_command \
+    "$EARNINGS_RAW" \
+    env PYTHONNOUSERSITE=1 \
+    "$VASTAIPATH" show earnings \
+    --start_date "$EARNINGS_START_UTC" \
+    --end_date "$EARNINGS_END_UTC" \
+    --raw
+
+validate_json \
+    "$EARNINGS_RAW"
+
+
+if [[ -s "$EARNINGS_RAW" ]] &&
+   jq -e . "$EARNINGS_RAW" >/dev/null 2>&1
+then
+
+    jq \
+        --arg collected_at_utc "$COLLECTED_AT_UTC" \
+        --arg start_utc "$EARNINGS_START_UTC" \
+        --arg end_utc "$EARNINGS_END_UTC" \
+        '
+            if type == "object" then
+                {
+                    collected_at_utc: $collected_at_utc,
+                    start_utc: $start_utc,
+                    end_utc: $end_utc,
+                    summary: (.summary // {}),
+                    per_machine: (.per_machine // []),
+                    per_day: (.per_day // [])
+                }
+            else
+                {
+                    collected_at_utc: $collected_at_utc,
+                    start_utc: $start_utc,
+                    end_utc: $end_utc,
+                    summary: {},
+                    per_machine: [],
+                    per_day: [],
+                    raw_type: type
+                }
+            end
+        ' \
+        "$EARNINGS_RAW" \
+        > "$EARNINGS_JSON" ||
+        log_error "Could not sanitize earnings JSON"
+
+
+    jq -r '
+        (
+            [
+                "scope",
+                "machine_id",
+                "day",
+                "gpu_earn",
+                "storage_earn",
+                "bandwidth_up_earn",
+                "bandwidth_down_earn",
+                "total_earn"
+            ],
+
+            (
+                .per_machine[]? |
+                [
+                    "machine",
+                    (.machine_id // ""),
+                    "",
+                    (.gpu_earn // 0),
+                    (.sto_earn // .storage_earn // 0),
+                    (.bwu_earn // .bandwidth_up_earn // 0),
+                    (.bwd_earn // .bandwidth_down_earn // 0),
+                    (
+                        .total_earn
+                        //
+                        (
+                            (.gpu_earn // 0)
+                            +
+                            (.sto_earn // .storage_earn // 0)
+                            +
+                            (.bwu_earn // .bandwidth_up_earn // 0)
+                            +
+                            (.bwd_earn // .bandwidth_down_earn // 0)
+                        )
+                    )
+                ]
+            ),
+
+            (
+                .per_day[]? |
+                [
+                    "day",
+                    "",
+                    (.day // .date // ""),
+                    (.gpu_earn // 0),
+                    (.sto_earn // .storage_earn // 0),
+                    (.bwu_earn // .bandwidth_up_earn // 0),
+                    (.bwd_earn // .bandwidth_down_earn // 0),
+                    (
+                        .total_earn
+                        //
+                        (
+                            (.gpu_earn // 0)
+                            +
+                            (.sto_earn // .storage_earn // 0)
+                            +
+                            (.bwu_earn // .bandwidth_up_earn // 0)
+                            +
+                            (.bwd_earn // .bandwidth_down_earn // 0)
+                        )
+                    )
+                ]
+            )
+        )
+
+        | @tsv
+    ' "$EARNINGS_JSON" \
+        > "$EARNINGS_TSV" ||
+        log_error "Could not create earnings-last24h-summary.tsv"
+
+else
+    log_error "Earnings raw JSON is empty or invalid"
+fi
+
+
+# 個人情報系フィールドを含み得るrawはアーカイブに残さない
+rm -f "$EARNINGS_RAW" "${EARNINGS_RAW}.stderr"
+
+
+# =============================================================================
+# machine別Earnings
+#
+# `vastai show earnings --machine_id` の per_day はhost全体の値になり得るため、
+# 補助CLI側で per_machine の一致行、または summary の必要キーだけを保存します。
+# =============================================================================
+
+if [[ "$COLLECT_MACHINE_EARNINGS" == "1" ]]; then
+    collect_machine_earnings
+fi
+
+
+# =============================================================================
+# 現在貸出可能な競合Offer
+#
+# Vast APIへの検索はGPUごとに1回だけ行います。
+# 価格順JSONは、同じ検索結果をローカルで並べ替えて作成します。
+#
+# search offers は一時的に失敗することがあるため、
+# retry付きの capture_offer_with_retry を使います。
+# =============================================================================
+
+#
+# RTX 5090：Vastの通常検索順
+#
+
+capture_offer_with_retry \
+    "${OUT}/RTX_5090-offers-score.json" \
+    'gpu_name=RTX_5090 num_gpus=1'
+
+validate_json \
+    "${OUT}/RTX_5090-offers-score.json"
+
+
+#
+# RTX 5090：同一結果をローカルで価格順に並べ替え
+#
+
+create_price_sorted_offer_file \
+    "${OUT}/RTX_5090-offers-score.json" \
+    "${OUT}/RTX_5090-offers-price.json"
+
+validate_json \
+    "${OUT}/RTX_5090-offers-price.json"
+
+
+#
+# RTX 3090：Vastの通常検索順
+#
+
+capture_offer_with_retry \
+    "${OUT}/RTX_3090-offers-score.json" \
+    'gpu_name=RTX_3090 num_gpus=1'
+
+validate_json \
+    "${OUT}/RTX_3090-offers-score.json"
+
+
+#
+# RTX 3090：同一結果をローカルで価格順に並べ替え
+#
+
+create_price_sorted_offer_file \
+    "${OUT}/RTX_3090-offers-score.json" \
+    "${OUT}/RTX_3090-offers-price.json"
+
+validate_json \
+    "${OUT}/RTX_3090-offers-price.json"
+
+
+# =============================================================================
+# 自ホストの直近24時間時系列
+# =============================================================================
+
+extract_last_24h \
+    "$STATUS_SOURCE" \
+    "${OUT}/machine-status-last24h.tsv"
+
+extract_last_24h \
+    "$RELIABILITY_SOURCE" \
+    "${OUT}/reliability-last24h.tsv"
+
+extract_last_24h \
+    "$TEMPERATURE_SOURCE" \
+    "${OUT}/gpu-temperature-last24h.tsv"
+
+
+# =============================================================================
+# 人間向けログの末尾
+# =============================================================================
+
+if [[ -r "$HUMAN_LOG_SOURCE" ]]; then
+    tail -n 1000 "$HUMAN_LOG_SOURCE" \
+        > "${OUT}/vastai-machinecheck-log-tail.txt"
+else
+    log_error \
+        "Cannot read human log: ${HUMAN_LOG_SOURCE}"
+fi
+
+
+# =============================================================================
+# 自ホスト状態の簡易サマリー
+# =============================================================================
+
+if [[ -s "${OUT}/machine-status-last24h.tsv" ]]; then
+
+    {
+        printf '%s\n' \
+            $'machine_id\tgpu_name\trecords\tfirst_timestamp\tlast_timestamp\tD_\tI_\tx_\tother\ton_demand_min\ton_demand_max\tinterruptible_min\tinterruptible_max\treliability_min\treliability_max'
+
+        awk -F '\t' '
+            NR == 1 {
+                next
+            }
+
+            {
+                machine_id = $2
+                gpu_name = $4
+                occupancy = $18
+
+                on_demand = $13 + 0
+                interruptible = $14 + 0
+                reliability = $8 + 0
+
+                records[machine_id]++
+
+                if (!(machine_id in first_timestamp)) {
+                    first_timestamp[machine_id] = $1
+                    last_timestamp[machine_id] = $1
+                    names[machine_id] = gpu_name
+
+                    on_demand_min[machine_id] = on_demand
+                    on_demand_max[machine_id] = on_demand
+
+                    interruptible_min[machine_id] = interruptible
+                    interruptible_max[machine_id] = interruptible
+
+                    reliability_min[machine_id] = reliability
+                    reliability_max[machine_id] = reliability
+                }
+
+                last_timestamp[machine_id] = $1
+
+                if (on_demand < on_demand_min[machine_id]) {
+                    on_demand_min[machine_id] = on_demand
+                }
+
+                if (on_demand > on_demand_max[machine_id]) {
+                    on_demand_max[machine_id] = on_demand
+                }
+
+                if (interruptible < interruptible_min[machine_id]) {
+                    interruptible_min[machine_id] = interruptible
+                }
+
+                if (interruptible > interruptible_max[machine_id]) {
+                    interruptible_max[machine_id] = interruptible
+                }
+
+                if (reliability < reliability_min[machine_id]) {
+                    reliability_min[machine_id] = reliability
+                }
+
+                if (reliability > reliability_max[machine_id]) {
+                    reliability_max[machine_id] = reliability
+                }
+
+                if (occupancy == "D_") {
+                    ondemand_count[machine_id]++
+                } else if (occupancy == "I_") {
+                    interruptible_count[machine_id]++
+                } else if (occupancy == "x_") {
+                    idle_count[machine_id]++
+                } else {
+                    other_count[machine_id]++
+                }
+            }
+
+            END {
+                for (machine_id in records) {
+                    printf "%s\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%.10g\t%.10g\t%.10g\t%.10g\t%.10g\t%.10g\n",
+                        machine_id,
+                        names[machine_id],
+                        records[machine_id],
+                        first_timestamp[machine_id],
+                        last_timestamp[machine_id],
+                        ondemand_count[machine_id] + 0,
+                        interruptible_count[machine_id] + 0,
+                        idle_count[machine_id] + 0,
+                        other_count[machine_id] + 0,
+                        on_demand_min[machine_id],
+                        on_demand_max[machine_id],
+                        interruptible_min[machine_id],
+                        interruptible_max[machine_id],
+                        reliability_min[machine_id],
+                        reliability_max[machine_id]
+                }
+            }
+        ' "${OUT}/machine-status-last24h.tsv" |
+            sort -t $'\t' -k1,1n
+
+    } > "${OUT}/machine-status-summary.tsv"
+
+fi
+
+
+# =============================================================================
+# Market Metricsの簡易サマリー
+# =============================================================================
+
+if [[ -s "$MARKET_JSON" ]] &&
+   jq -e . "$MARKET_JSON" >/dev/null 2>&1
+then
+
+    jq -r '
+        def nums($values):
+            [
+                $values[]
+                | select(type == "number")
+            ];
+
+        def avg($values):
+            nums($values) as $numbers
+            |
+            if ($numbers | length) == 0 then
+                null
+            else
+                (
+                    ($numbers | add)
+                    /
+                    ($numbers | length)
+                )
+            end;
+
+        (
+            [
+                "gpu",
+                "records",
+                "first_utc",
+                "last_utc",
+
+                "first_rented_median",
+                "last_rented_median",
+                "rented_median_change",
+                "avg_rented_median",
+
+                "first_available_median",
+                "last_available_median",
+                "available_median_change",
+                "avg_available_median",
+
+                "avg_market_utilization",
+                "last_market_utilization",
+                "last_total"
+            ],
+
+            (
+                to_entries[]
+
+                | select(
+                    (.value.rows | type) == "array"
+                )
+
+                | .key as $gpu
+
+                | (
+                    [
+                        .value.rows[]
+                        | select(
+                            (.timestamp | type) == "number"
+                        )
+                    ]
+                    | sort_by(.timestamp)
+                  ) as $rows
+
+                | ($rows | length) as $count
+
+                | if $count == 0 then
+
+                    [
+                        $gpu,
+                        0,
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        ""
+                    ]
+
+                  else
+
+                    (
+                        [
+                            $rows[]
+
+                            | select(
+                                (.total | type) == "number"
+                                and .total > 0
+                            )
+
+                            | (
+                                (
+                                    (.rented_verified // 0)
+                                    +
+                                    (.rented_unverified // 0)
+                                )
+                                /
+                                .total
+                              )
+                        ]
+                      ) as $utilizations
+
+                    | [
+                        $gpu,
+                        $count,
+
+                        (
+                            $rows[0].timestamp
+                            | strftime("%Y-%m-%dT%H:%M:%SZ")
+                        ),
+
+                        (
+                            $rows[-1].timestamp
+                            | strftime("%Y-%m-%dT%H:%M:%SZ")
+                        ),
+
+                        $rows[0].rented_median,
+                        $rows[-1].rented_median,
+
+                        (
+                            ($rows[-1].rented_median // 0)
+                            -
+                            ($rows[0].rented_median // 0)
+                        ),
+
+                        avg(
+                            $rows
+                            | map(.rented_median)
+                        ),
+
+                        $rows[0].avail_median,
+                        $rows[-1].avail_median,
+
+                        (
+                            ($rows[-1].avail_median // 0)
+                            -
+                            ($rows[0].avail_median // 0)
+                        ),
+
+                        avg(
+                            $rows
+                            | map(.avail_median)
+                        ),
+
+                        avg($utilizations),
+
+                        (
+                            if (
+                                ($rows[-1].total | type) == "number"
+                                and $rows[-1].total > 0
+                            )
+                            then
+                                (
+                                    (
+                                        ($rows[-1].rented_verified // 0)
+                                        +
+                                        ($rows[-1].rented_unverified // 0)
+                                    )
+                                    /
+                                    $rows[-1].total
+                                )
+                            else
+                                null
+                            end
+                        ),
+
+                        $rows[-1].total
+                    ]
+
+                  end
+            )
+        )
+
+        | @tsv
+
+    ' "$MARKET_JSON" \
+        > "${OUT}/gpu-market-summary.tsv" ||
+        log_error \
+            "Could not create gpu-market-summary.tsv"
+
+fi
+
+
+# =============================================================================
+# Offer価格分布の簡易サマリー
+#
+# scoreとpriceは同一Offer集合なので、件数と価格分布は一致するはずです。
+# 両方記録することで、ローカルソートが正しく行われたか確認できます。
+# =============================================================================
+
+{
+    printf '%s\n' \
+        $'gpu\torder\tcount\tmin_dph_total\tp10_dph_total\tp25_dph_total\tmedian_dph_total\tp75_dph_total\tp90_dph_total\tmax_dph_total'
+
+    while read -r gpu order file
+    do
+
+        if [[ ! -s "$file" ]] ||
+           ! jq -e . "$file" >/dev/null 2>&1
+        then
+            printf '%s\t%s\tERROR\t\t\t\t\t\t\t\n' \
+                "$gpu" \
+                "$order"
+
+            continue
+        fi
+
+        jq -r \
+            --arg gpu "$gpu" \
+            --arg order "$order" '
+                def offer_list:
+                    if type == "array" then
+                        .
+                    elif (
+                        type == "object"
+                        and has("offers")
+                        and ((.offers | type) == "array")
+                    )
+                    then
+                        .offers
+                    else
+                        []
+                    end;
+
+                def percentile($values; $percentile):
+                    ($values | length) as $count
+
+                    | if $count == 0 then
+                        null
+
+                      elif $count == 1 then
+                        $values[0]
+
+                      else
+                        (
+                            ($count - 1)
+                            *
+                            $percentile
+                        ) as $position
+
+                        | ($position | floor) as $lower
+                        | ($position | ceil) as $upper
+
+                        | if $lower == $upper then
+                            $values[$lower]
+                          else
+                            (
+                                $values[$lower]
+                                +
+                                (
+                                    (
+                                        $values[$upper]
+                                        -
+                                        $values[$lower]
+                                    )
+                                    *
+                                    (
+                                        $position
+                                        -
+                                        $lower
+                                    )
+                                )
+                            )
+                          end
+                      end;
+
+                (
+                    [
+                        offer_list[]
+
+                        | (
+                            .dph_total
+                            //
+                            .discounted_dph_total
+                        )
+
+                        | select(
+                            type == "number"
+                        )
+                    ]
+                    | sort
+                ) as $prices
+
+                | [
+                    $gpu,
+                    $order,
+                    ($prices | length),
+
+                    percentile($prices; 0.00),
+                    percentile($prices; 0.10),
+                    percentile($prices; 0.25),
+                    percentile($prices; 0.50),
+                    percentile($prices; 0.75),
+                    percentile($prices; 0.90),
+                    percentile($prices; 1.00)
+                ]
+
+                | @tsv
+
+            ' "$file"
+
+    done <<EOF_OFFERS
+RTX_5090 score ${OUT}/RTX_5090-offers-score.json
+RTX_5090 price ${OUT}/RTX_5090-offers-price.json
+RTX_3090 score ${OUT}/RTX_3090-offers-score.json
+RTX_3090 price ${OUT}/RTX_3090-offers-price.json
+EOF_OFFERS
+
+} > "${OUT}/offer-summary.tsv"
+
+
+# =============================================================================
+# score版とprice版が同一Offer集合か確認
+# =============================================================================
+
+{
+    printf '%s\n' \
+        $'gpu\tscore_count\tprice_count\tsame_offer_ids'
+
+    for gpu in RTX_5090 RTX_3090
+    do
+        score_file="${OUT}/${gpu}-offers-score.json"
+        price_file="${OUT}/${gpu}-offers-price.json"
+
+        if [[ ! -s "$score_file" ]] ||
+           [[ ! -s "$price_file" ]] ||
+           ! jq -e . "$score_file" >/dev/null 2>&1 ||
+           ! jq -e . "$price_file" >/dev/null 2>&1
+        then
+            printf '%s\tERROR\tERROR\tERROR\n' "$gpu"
+            continue
+        fi
+
+        score_ids="$(
+            jq -c '
+                def offer_list:
+                    if type == "array" then
+                        .
+                    elif (
+                        type == "object"
+                        and has("offers")
+                        and ((.offers | type) == "array")
+                    )
+                    then
+                        .offers
+                    else
+                        []
+                    end;
+
+                [
+                    offer_list[]
+                    | (
+                        .id
+                        //
+                        .ask_contract_id
+                        //
+                        .machine_id
+                    )
+                ]
+                | sort
+            ' "$score_file"
+        )"
+
+        price_ids="$(
+            jq -c '
+                def offer_list:
+                    if type == "array" then
+                        .
+                    elif (
+                        type == "object"
+                        and has("offers")
+                        and ((.offers | type) == "array")
+                    )
+                    then
+                        .offers
+                    else
+                        []
+                    end;
+
+                [
+                    offer_list[]
+                    | (
+                        .id
+                        //
+                        .ask_contract_id
+                        //
+                        .machine_id
+                    )
+                ]
+                | sort
+            ' "$price_file"
+        )"
+
+        score_count="$(
+            jq '
+                if type == "array" then
+                    length
+                elif (
+                    type == "object"
+                    and ((.offers | type) == "array")
+                ) then
+                    (.offers | length)
+                else
+                    0
+                end
+            ' "$score_file"
+        )"
+
+        price_count="$(
+            jq '
+                if type == "array" then
+                    length
+                elif (
+                    type == "object"
+                    and ((.offers | type) == "array")
+                ) then
+                    (.offers | length)
+                else
+                    0
+                end
+            ' "$price_file"
+        )"
+
+        if [[ "$score_ids" == "$price_ids" ]]; then
+            same_ids="yes"
+        else
+            same_ids="no"
+            log_error \
+                "${gpu}: score and price files do not contain the same Offer IDs"
+        fi
+
+        printf '%s\t%s\t%s\t%s\n' \
+            "$gpu" \
+            "$score_count" \
+            "$price_count" \
+            "$same_ids"
+
+    done
+
+} > "${OUT}/offer-order-check.tsv"
+
+
+# =============================================================================
+# 空のエラーログを削除
+# =============================================================================
+
+if [[ ! -s "${OUT}/collection-errors.log" ]]; then
+    rm -f "${OUT}/collection-errors.log"
+fi
+
+
+# =============================================================================
+# チェックサム
+# =============================================================================
+
+(
+    cd "$OUT"
+
+    find . \
+        -maxdepth 1 \
+        -type f \
+        ! -name manifest.sha256 \
+        -printf '%P\0' |
+        sort -z |
+        xargs -0 -r sha256sum
+
+) > "${OUT}/manifest.sha256"
+
+
+# =============================================================================
+# 日付ディレクトリを確定
+# =============================================================================
+
+# 同じ日に再実行した場合は、同日分を置き換える
+rm -rf "$FINAL_DIR"
+
+mv "$OUT" "$FINAL_DIR"
+
+# cleanupで確定済みディレクトリを消さない
+OUT=""
+
+
+# =============================================================================
+# txzアーカイブ作成
+# =============================================================================
+
+ARCHIVE_TMP="${FINAL_ARCHIVE}.tmp"
+
+rm -f "$ARCHIVE_TMP"
+
+tar \
+    -C "$BASE_DIR" \
+    -cJf "$ARCHIVE_TMP" \
+    "$DAY"
+
+mv \
+    "$ARCHIVE_TMP" \
+    "$FINAL_ARCHIVE"
+
+
+# =============================================================================
+# 結果表示
+# =============================================================================
+
+echo
+echo "Vast.ai daily collection completed."
+echo
+
+echo "Directory:"
+echo "  $FINAL_DIR"
+echo
+
+echo "Archive:"
+echo "  $FINAL_ARCHIVE"
+echo
+
+if [[ "$FAILED" -ne 0 ]]; then
+    echo "Some collection steps failed."
+    echo "Check:"
+    echo "  ${FINAL_DIR}/collection-errors.log"
+
+    exit 1
+fi
+
+echo "All collection steps completed successfully."

@@ -90,6 +90,14 @@ bin/collect-machine-earnings --output-dir "$WORK_DIR" --config /home/bee/vast-re
 
 この補助CLIは各マシンについて `vastai show earnings --machine_id <machine_id>` を実行し、`earnings-last24h-machine-<machine_id>.json` をatomic writeします。Vast.ai CLIのstdoutはメモリ上でJSON解析するだけで、`per_day` や未知のrawフィールドは保存しません。保存するのは `per_machine` の一致行、または一致行がない場合の `summary.total_gpu` / `summary.total_stor` / `summary.total_bwu` / `summary.total_bwd` など、集計に必要なキーだけです。
 
+git管理版の収集スクリプト `bin/collect-vast-daily` には、このmachine別Earnings収集が組み込み済みです。cronから使う場合は、既存の `/home/bee/bin/collect-vast-daily.sh` を直接編集する代わりに、cronの実行先を `/home/bee/vast-report/bin/collect-vast-daily` へ切り替える運用にすると、収集処理もgitで追跡できます。
+
+```cron
+15 9 * * * bee bash /home/bee/vast-report/bin/collect-vast-daily
+```
+
+`VASTAIPATH`、`BASE_DIR`、`MACHINE_EARNINGS_MACHINE_IDS`、`MACHINE_EARNINGS_COLLECTOR` などは環境変数で上書きできます。既定では `MACHINE_EARNINGS_MACHINE_IDS="28351 35058"` を収集します。
+
 Markdownレポートには、ホスト全体のGPU収益/hと総収益/h、結論、直近24時間実績、市場状況、候補価格の競合順位、Warnings、メモを出します。直近24時間実績では、現在のListed価格と、状態ファイルから推定した契約価格を分けて表示します。
 
 JSON推奨設定には、マシンごとの現在価格、推奨価格、判断、理由、稼働率、収益/h、候補価格順位を出します。
@@ -120,6 +128,7 @@ bin/send-vast-report --latest
 
 ```text
 bin/analyze-vast-daily        CLI入口
+bin/collect-vast-daily        日次データ収集スクリプト
 bin/collect-machine-earnings  machine別Earnings収集補助
 bin/send-vast-report          最新Markdownを標準出力へ出す
 config.yaml                   マシンID、価格、候補価格、閾値
